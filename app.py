@@ -1,11 +1,7 @@
 import streamlit as st
 import streamlit_authenticator as stauth
-import pandas as pd
-from dateutil import parser as dtparser
 from streamlit_authenticator.utilities import Location
-
-name, auth_status, username = authenticator.login("Login", location=Location.MAIN)
-
+import pandas as pd
 
 st.set_page_config(page_title="Merchant Portal", layout="wide")
 
@@ -20,7 +16,7 @@ for uname, u in users_cfg.items():
     creds["usernames"][uname] = {
         "name": u["name"],
         "email": u["email"],
-        "password": u["password_hash"],  # already bcrypt hashed
+        "password": u["password_hash"],  # bcrypt hash
     }
 
 authenticator = stauth.Authenticate(
@@ -30,7 +26,8 @@ authenticator = stauth.Authenticate(
     cookie_expiry_days=7,
 )
 
-name, auth_status, username = authenticator.login("Login", "main")
+# Login UI — use enum for newer versions
+name, auth_status, username = authenticator.login("Login", location=Location.MAIN)
 
 if auth_status is False:
     st.error("Invalid credentials")
@@ -50,52 +47,55 @@ merchant_id = users_cfg[username]["merchant_id"]
 # ---------------------------
 @st.cache_data(ttl=60)
 def load_data():
-    df = pd.read_csv("sample_merchant_transactions.csv", parse_dates=["date"])
+    # expects columns: merchant_id,date,revenue,orders,aov
+    df = pd.read_csv("data/merchant_data.csv", parse_dates=["date"])
+    # basic type safety
+    for col in ["revenue", "orders", "aov"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 raw = load_data()
 
 # ---------------------------
-# Filter for this merchant
+# Validate & Filter
 # ---------------------------
-if "merchant_id" not in raw.columns:
-    st.error("Expected column 'merchant_id' not found in data.")
+required_cols = {"merchant_id", "date"}
+missing = required_cols - set(raw.columns)
+if missing:
+    st.error(f"Missing required column(s): {', '.join(sorted(missing))}")
     st.stop()
 
 df = raw.loc[raw["merchant_id"] == merchant_id].copy()
-
-st.title("📊 Merchant Dashboard")
-st.caption(f"Merchant: **{merchant_id}**")
-
 if df.empty:
     st.warning("No rows for this merchant yet.")
     st.stop()
 
-# Ensure numeric types
-for col in ["revenue", "orders", "aov"]:
-    if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+df = df.sort_values("date")
 
 # --------------------------------
 # Sidebar date filter
 # --------------------------------
-min_date = df["date"].min()
-max_date = df["date"].max()
+min_date = df["date"].min().date()
+max_date = df["date"].max().date()
 start_date, end_date = st.sidebar.date_input(
     "Date range",
-    value=(min_date.date(), max_date.date()),
-    min_value=min_date.date(),
-    max_value=max_date.date(),
+    value=(min_date, max_date),
+    min_value=min_date,
+    max_value=max_date,
 )
 mask = (df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)
-df = df.loc[mask].sort_values("date")
+df = df.loc[mask]
 
 # --------------------------------
 # KPIs
 # --------------------------------
-total_rev = df["revenue"].sum()
+total_rev = df["revenue"].sum() if "revenue" in df.columns else 0
 total_orders = int(df["orders"].sum()) if "orders" in df.columns else 0
 aov_latest = df["aov"].iloc[-1] if "aov" in df.columns and len(df) else None
+
+st.title("📊 Merchant Dashboard")
+st.caption(f"Merchant: **{merchant_id}**")
 
 k1, k2, k3 = st.columns(3)
 k1.metric("Total Revenue", f"R {total_rev:,.0f}")
@@ -105,12 +105,12 @@ k3.metric("Latest AOV", f"R {aov_latest:,.2f}" if aov_latest is not None else "�
 # --------------------------------
 # Visuals
 # --------------------------------
-df_plot = df.set_index("date").sort_index()
-show_cols = [c for c in ["revenue", "orders"] if c in df_plot.columns]
+df_plot = df.set_index("date")
+to_show = [c for c in ["revenue", "orders"] if c in df_plot.columns]
 
 st.subheader("Trends")
-if show_cols:
-    st.line_chart(df_plot[show_cols])
+if to_show:
+    st.line_chart(df_plot[to_show])
 
 if "aov" in df_plot.columns:
     st.subheader("Average Order Value")
