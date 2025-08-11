@@ -48,7 +48,7 @@ authenticator = stauth.Authenticate(
 )
 
 # Login UI
-name, auth_status, username = authenticator.login("Login", location="main")
+name, auth_status, username = authenticator.login("Login", "main")
 
 if auth_status is False:
     st.error("Invalid credentials")
