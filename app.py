@@ -98,9 +98,6 @@ if merchant_tx.empty:
     st.warning(f"No transactions found for merchant: {merchant_id}")
     st.stop()
 
-st.info(f"DEBUG username: {st.session_state.get('username')}")
-st.info(f"DEBUG users in secrets: {list(st.secrets.get('users', {}).keys())}")
-
 
 # =========================
 # Aggregate: daily revenue/orders/AOV
