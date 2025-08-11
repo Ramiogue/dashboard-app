@@ -46,7 +46,7 @@ merchant_id = users_cfg[username]["merchant_id"]
 # ---------------------------
 @st.cache_data(ttl=60)
 def load_data():
-    df = pd.read_csv("data/merchant_data.csv", parse_dates=["date"])
+    df = pd.read_csv("sample_merchant_transactions.csv", parse_dates=["date"])
     return df
 
 raw = load_data()
