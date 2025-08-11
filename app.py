@@ -2,6 +2,10 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import pandas as pd
 from dateutil import parser as dtparser
+from streamlit_authenticator.utilities import Location
+
+name, auth_status, username = authenticator.login("Login", location=Location.MAIN)
+
 
 st.set_page_config(page_title="Merchant Portal", layout="wide")
 
