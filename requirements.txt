@@ -1,0 +1,7 @@
+streamlit
+streamlit-authenticator
+pandas
+gspread
+oauth2client
+bcrypt
+python-dateutil
