@@ -1,18 +1,19 @@
 import streamlit as st
-import streamlit_authenticator as stauth
 import pandas as pd
+import streamlit_authenticator as stauth
 
-# ========= App setup =========
 st.set_page_config(page_title="Merchant Portal", layout="wide")
 
-# ========= Auth (from Secrets) =========
-# In Streamlit Cloud → App → Settings → Secrets, add:
+# =========================
+# Auth from Secrets
+# =========================
+# Example Secrets (App → Settings → Secrets):
 # COOKIE_KEY = "replace_with_random_secret"
 # [users."merchant_a"]
 # name = "Merchant A"
 # email = "a@example.com"
 # password_hash = "$2b$12$REPLACE_WITH_BCRYPT_HASH_FOR_A"
-# merchant_id = "M001 - Merchant A"
+# merchant_id = "M001 - Merchant A"   # <-- must match values in the CSV's merchant column
 # [users."merchant_b"]
 # name = "Merchant B"
 # email = "b@example.com"
@@ -22,112 +23,182 @@ st.set_page_config(page_title="Merchant Portal", layout="wide")
 users_cfg = st.secrets.get("users", {})
 cookie_key = st.secrets.get("COOKIE_KEY", "change-me")
 
-# Build 0.3.x-compatible config
-config = {
-    "credentials": {
-        "usernames": {
-            uname: {
-                "email": u["email"],
-                "name": u["name"],
-                "password": u["password_hash"],  # bcrypt hash
-            }
-            for uname, u in users_cfg.items()
-        }
-    },
-    "cookie": {"name": "merchant_portal", "key": cookie_key, "expiry_days": 7},
-    "preauthorized": {"emails": []},
-}
+# Build credentials dict (new API compatible)
+creds = {"usernames": {}}
+for uname, u in users_cfg.items():
+    creds["usernames"][uname] = {
+        "name": u["name"],
+        "email": u["email"],
+        "password": u["password_hash"],  # bcrypt hash
+    }
 
-# Constructor signature for streamlit-authenticator==0.3.2
-authenticator = stauth.Authenticate(
-    config["credentials"],
-    config["cookie"]["name"],
-    config["cookie"]["key"],
-    config["cookie"]["expiry_days"],
-    config["preauthorized"],
-)
+# =========================
+# Authenticator (new API first, fallback to old)
+# =========================
+def build_authenticator():
+    # Try NEW signature (>=0.4.x)
+    try:
+        return stauth.Authenticate(
+            credentials=creds,
+            cookie_name="merchant_portal",
+            key= cookie_key,
+            cookie_expiry_days=7,
+        ), "new"
+    except TypeError:
+        pass
+    # Fallback: OLD signature (0.3.x)
+    config_03x = {
+        "credentials": {"usernames": creds["usernames"]},
+        "cookie": {"name": "merchant_portal", "key": cookie_key, "expiry_days": 7},
+        "preauthorized": {"emails": []},
+    }
+    return stauth.Authenticate(
+        config_03x["credentials"],
+        config_03x["cookie"]["name"],
+        config_03x["cookie"]["key"],
+        config_03x["cookie"]["expiry_days"],
+        config_03x["preauthorized"],
+    ), "old"
 
-# Login UI
-name, auth_status, username = authenticator.login("Login", "main")
+authenticator, api_mode = build_authenticator()
+
+def do_login():
+    if api_mode == "new":
+        try:
+            from streamlit_authenticator.utilities import Location
+            return authenticator.login(location=Location.MAIN)
+        except Exception:
+            pass
+    # Old API positional args: (form_name, location)
+    return authenticator.login("Login", "main")
+
+name, auth_status, username = do_login()
 
 if auth_status is False:
-    st.error("Invalid credentials")
-    st.stop()
+    st.error("Invalid credentials"); st.stop()
 elif auth_status is None:
-    st.info("Please log in.")
-    st.stop()
+    st.info("Please log in."); st.stop()
 
-# Logged-in area
 authenticator.logout("Logout", "sidebar")
 st.sidebar.write(f"Hello, **{name}**")
 
-# Resolve the merchant_id from the secrets mapping (server-side; no user input)
+# Resolve merchant_id server-side (must match CSV merchant column values)
 try:
     merchant_id = users_cfg[username]["merchant_id"]
 except KeyError:
     st.error("Merchant mapping not found for this user. Check Secrets configuration.")
     st.stop()
 
-# ========= Data load =========
+# =========================
+# Load transactions CSV
+# =========================
 @st.cache_data(ttl=60)
-def load_data(path: str) -> pd.DataFrame:
-    # Expects columns: merchant_id,date,revenue,orders,aov
-    df = pd.read_csv(path, parse_dates=["date"])
-    # Coerce numeric fields if present
-    for col in ["revenue", "orders", "aov"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
+def load_transactions():
+    # Try repo root, then /data
+    paths = ["sample_merchant_transactions.csv", "data/sample_merchant_transactions.csv"]
+    last_err = None
+    for p in paths:
+        try:
+            df = pd.read_csv(p)
+            df["__path__"] = p
+            return df
+        except Exception as e:
+            last_err = e
+    raise FileNotFoundError(f"Could not read CSV from {paths}. Last error: {last_err}")
 
-DATA_PATH = "data/merchant_data.csv"
-try:
-    raw = load_data(DATA_PATH)
-except FileNotFoundError:
-    st.error(f"Data file not found at '{DATA_PATH}'. Make sure it exists in your repo.")
-    st.stop()
+tx = load_transactions()
 
-# Basic schema checks
-required = {"merchant_id", "date"}
-missing = required - set(raw.columns)
+# =========================
+# Validate & normalize columns
+# =========================
+# Expected core columns from your screenshot:
+# "Merchant Number - Business Name", "Transaction Date", "Settle Amount"
+needed = {
+    "Merchant Number - Business Name",
+    "Transaction Date",
+    "Settle Amount",
+}
+missing = needed - set(tx.columns)
 if missing:
-    st.error(f"Missing required column(s): {', '.join(sorted(missing))}")
+    st.error(f"Missing required column(s) in CSV: {', '.join(sorted(missing))}")
     st.stop()
 
-# ========= Filter to this merchant =========
-df = raw.loc[raw["merchant_id"] == merchant_id].copy()
-if df.empty:
-    st.warning("No rows for this merchant yet.")
+# Parse date; coerce numeric amount
+tx["Transaction Date"] = pd.to_datetime(tx["Transaction Date"], errors="coerce")
+tx["Settle Amount"] = pd.to_numeric(tx["Settle Amount"], errors="coerce")
+
+# Optional: clean merchant name (strip spaces)
+tx["Merchant Number - Business Name"] = tx["Merchant Number - Business Name"].astype(str).str.strip()
+
+# =========================
+# Filter to logged-in merchant
+# NOTE: Your Secrets' merchant_id must equal the value in
+# "Merchant Number - Business Name" for that merchant.
+# Example: "M001 - Merchant A"
+# =========================
+merchant_mask = tx["Merchant Number - Business Name"] == merchant_id
+merchant_tx = tx.loc[merchant_mask].copy()
+
+if merchant_tx.empty:
+    st.warning(f"No transactions found for merchant: {merchant_id}")
     st.stop()
 
-df = df.sort_values("date")
+# =========================
+# Aggregate to daily metrics
+# revenue = sum(Settle Amount)
+# orders  = count rows
+# aov     = revenue / orders
+# =========================
+daily = (
+    merchant_tx
+    .groupby(merchant_tx["Transaction Date"].dt.date, dropna=False)
+    .agg(revenue=("Settle Amount", "sum"),
+         orders=("Settle Amount", "count"))
+    .reset_index()
+    .rename(columns={"Transaction Date": "date"})
+)
+daily["date"] = pd.to_datetime(daily["Transaction Date"], errors="coerce") if "Transaction Date" in daily.columns else pd.to_datetime(daily["date"])
+daily["aov"] = (daily["revenue"] / daily["orders"]).where(daily["orders"] > 0)
 
-# ========= Sidebar filters =========
-min_date = df["date"].min().date()
-max_date = df["date"].max().date()
+# Guard against no valid dates
+if daily["date"].isna().all():
+    st.error("All transaction dates are invalid/unparsed. Check the 'Transaction Date' values.")
+    st.stop()
+
+daily = daily.dropna(subset=["date"]).sort_values("date")
+
+# =========================
+# Sidebar date filter
+# =========================
+min_date = daily["date"].min().date()
+max_date = daily["date"].max().date()
 start_date, end_date = st.sidebar.date_input(
     "Date range",
     value=(min_date, max_date),
     min_value=min_date,
     max_value=max_date,
 )
-mask = (df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)
-df = df.loc[mask]
+daily = daily[(daily["date"].dt.date >= start_date) & (daily["date"].dt.date <= end_date)]
 
-# ========= KPIs =========
-total_rev = df["revenue"].sum() if "revenue" in df.columns else 0
-total_orders = int(df["orders"].sum()) if "orders" in df.columns else 0
-aov_latest = df["aov"].iloc[-1] if "aov" in df.columns and len(df) else None
-
+# =========================
+# KPIs
+# =========================
 st.title("📊 Merchant Dashboard")
-st.caption(f"Merchant: **{merchant_id}**")
+st.caption(f"Merchant: **{merchant_id}**  |  Source: `{tx['__path__'].iat[0]}`")
+
+total_rev = float(daily["revenue"].sum()) if not daily.empty else 0.0
+total_orders = int(daily["orders"].sum()) if not daily.empty else 0
+aov_latest = daily["aov"].iloc[-1] if not daily.empty else None
 
 k1, k2, k3 = st.columns(3)
-k1.metric("Total Revenue", f"R {total_rev:,.0f}")
+k1.metric("Total Revenue (Settle)", f"R {total_rev:,.0f}")
 k2.metric("Total Orders", f"{total_orders:,}")
-k3.metric("Latest AOV", f"R {aov_latest:,.2f}" if aov_latest is not None else "—")
+k3.metric("Latest AOV", f"R {aov_latest:,.2f}" if pd.notnull(aov_latest) else "—")
 
-# ========= Visuals =========
-df_plot = df.set_index("date")
+# =========================
+# Charts
+# =========================
+df_plot = daily.set_index("date")
 to_show = [c for c in ["revenue", "orders"] if c in df_plot.columns]
 
 st.subheader("Trends")
@@ -135,8 +206,8 @@ if to_show:
     st.line_chart(df_plot[to_show])
 
 if "aov" in df_plot.columns:
-    st.subheader("Average Order Value")
+    st.subheader("Average Order Value (AOV)")
     st.bar_chart(df_plot[["aov"]])
 
-st.subheader("Raw Data")
-st.dataframe(df.reset_index(drop=True))
+st.subheader("Daily Aggregated Rows")
+st.dataframe(daily.reset_index(drop=True))
